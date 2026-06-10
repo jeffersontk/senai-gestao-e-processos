@@ -1,36 +1,78 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Gestao de Horas
 
-## Getting Started
+Aplicacao Next.js para gestao de horas por projeto, demais atividades mensais, registro diario de ponto e MMP.
 
-First, run the development server:
+## Rodar localmente
+
+Configure o Supabase antes de iniciar a aplicacao.
 
 ```bash
+npm install
+npm run prisma:generate
+npm run prisma:migrate
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Acesse `http://localhost:3000`.
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+## O que esta implementado
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+- Login basico por perfil.
+- Dashboard administrativo com filtros, cards, graficos simples e matriz mensal.
+- Cadastro e edicao de projetos.
+- Cadastro de tipo de projeto pelo modal dentro do formulario de projeto.
+- Cadastro e edicao de colaboradores.
+- Lancamento mensal de horas por projeto e demais atividades.
+- Envio, aprovacao e reabertura de lancamentos.
+- Registro diario de ponto com projeto do dia, entrada, intervalo e saida.
+- Relatorios administrativos por mes, colaborador, projeto e tipo.
+- Modulo administrativo de MMP com previa no padrao MAT-002, geracao de PDF e guarda do PDF assinado.
 
-## Learn More
+## Persistencia
 
-To learn more about Next.js, take a look at the following resources:
+O projeto usa Supabase Postgres com Prisma. Nao ha fallback local nem seed automatico.
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+1. Crie um projeto no Supabase.
+2. Copie `.env.example` para `.env.local`.
+3. Em Project Settings > Database, copie as URLs do Postgres:
+   - `DATABASE_URL`: transaction pooler, porta `6543`, com `?pgbouncer=true`.
+   - `DIRECT_URL`: session pooler, porta `5432`, usada nas migrations.
+4. Preencha:
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+```env
+SUPABASE_STATE_ID=gestao-horas
+APP_LOGIN_PASSWORD="<defina-uma-senha-forte>"
+ROOT_USER_EMAIL="admin@sistema.local"
+ROOT_USER_PASSWORD="<senha-inicial-do-root>"
+DATABASE_URL="postgresql://postgres.<project-ref>:<database-password>@<region>.pooler.supabase.com:6543/postgres?pgbouncer=true"
+DIRECT_URL="postgresql://postgres.<project-ref>:<database-password>@<region>.pooler.supabase.com:5432/postgres"
+```
 
-## Deploy on Vercel
+5. Gere o client e aplique a migration:
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Vercel.
+```bash
+npm run prisma:generate
+npm run prisma:migrate
+```
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+6. Crie ou atualize o usuario root:
+
+```bash
+npm run seed:root
+```
+
+Por padrao, o seed cria `admin@sistema.local` com perfil `ADMIN`. A senha inicial usa `ROOT_USER_PASSWORD`; se ela nao existir, usa `APP_LOGIN_PASSWORD`.
+
+O frontend continua falando apenas com a API do Next.js. O Prisma fica somente no backend.
+
+## Scripts
+
+```bash
+npm run lint
+npm run build
+npm run dev
+npm run prisma:generate
+npm run prisma:migrate
+npm run prisma:studio
+npm run seed:root
+```
