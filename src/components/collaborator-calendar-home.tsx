@@ -61,6 +61,17 @@ type ActivityRow = {
   observation: string;
 };
 
+const SEGMENT_COLORS = [
+  "border-blue-300 bg-blue-100 text-blue-950 hover:border-blue-400 hover:bg-blue-200",
+  "border-emerald-300 bg-emerald-100 text-emerald-950 hover:border-emerald-400 hover:bg-emerald-200",
+  "border-purple-300 bg-purple-100 text-purple-950 hover:border-purple-400 hover:bg-purple-200",
+  "border-orange-300 bg-orange-100 text-orange-950 hover:border-orange-400 hover:bg-orange-200",
+  "border-rose-300 bg-rose-100 text-rose-950 hover:border-rose-400 hover:bg-rose-200",
+  "border-cyan-300 bg-cyan-100 text-cyan-950 hover:border-cyan-400 hover:bg-cyan-200",
+];
+const OTHER_ACTIVITY_COLOR =
+  "border-violet-300 bg-violet-100 text-violet-950 hover:border-violet-400 hover:bg-violet-200";
+
 const inputClass =
   "h-10 w-full rounded-md border border-zinc-200 bg-white px-3 text-sm text-zinc-900 outline-none transition focus:border-blue-500 focus:ring-2 focus:ring-blue-100";
 const textareaClass =
@@ -178,6 +189,70 @@ function findProject(store: StoreData, id: string) {
   return store.projects.find((project) => project.id === id);
 }
 
+function currentActivityLabel(record: TimeRecord | undefined, store: StoreData): string {
+  if (!record) return "—";
+  const segments = record.projectSegments;
+  if (!segments?.length) return findProject(store, record.projectId)?.nome ?? "—";
+  const last = segments[segments.length - 1];
+  if (last.type === "project") return findProject(store, last.projectId)?.nome ?? "—";
+  return last.category;
+}
+
+function buildRowsFromSegments(
+  record: TimeRecord,
+  projects: Project[],
+): { projectRows: ProjectRow[]; activityRows: ActivityRow[] } {
+  const segments = record.projectSegments?.length
+    ? record.projectSegments
+    : [{ type: "project" as const, projectId: record.projectId, startAt: record.entryAt }];
+
+  const exitMs = record.exitAt ? new Date(record.exitAt).getTime() : Date.now();
+
+  const projectMinutes = new Map<string, number>();
+  const activityMinutes = new Map<OtherActivityCategory, number>();
+
+  segments.forEach((seg, i) => {
+    const startMs = new Date(seg.startAt).getTime();
+    const endMs = i < segments.length - 1 ? new Date(segments[i + 1].startAt).getTime() : exitMs;
+
+    let breakOverlapMs = 0;
+    if (record.breakStartAt && record.breakEndAt) {
+      const bStart = new Date(record.breakStartAt).getTime();
+      const bEnd = new Date(record.breakEndAt).getTime();
+      breakOverlapMs = Math.max(0, Math.min(endMs, bEnd) - Math.max(startMs, bStart));
+    }
+
+    const minutes = Math.max(0, Math.round((endMs - startMs - breakOverlapMs) / 60_000));
+
+    if (seg.type === "project") {
+      projectMinutes.set(seg.projectId, (projectMinutes.get(seg.projectId) ?? 0) + minutes);
+    } else {
+      activityMinutes.set(seg.category, (activityMinutes.get(seg.category) ?? 0) + minutes);
+    }
+  });
+
+  const projectRows: ProjectRow[] = Array.from(projectMinutes.entries()).map(([projectId, mins]) => ({
+    projectId,
+    hours: durationInputValue(minutesToDuration(mins)),
+    observation: "",
+  }));
+
+  const activityRows: ActivityRow[] = Array.from(activityMinutes.entries()).map(([category, mins]) => ({
+    category,
+    hours: durationInputValue(minutesToDuration(mins)),
+    observation: "",
+  }));
+
+  return {
+    projectRows: projectRows.length > 0
+      ? projectRows
+      : [{ projectId: projects[0]?.id ?? "", hours: "", observation: "" }],
+    activityRows: activityRows.length > 0
+      ? activityRows
+      : [{ category: OTHER_ACTIVITY_CATEGORIES[0], hours: "", observation: "" }],
+  };
+}
+
 export default function CollaboratorCalendarHome({
   session,
   store,
@@ -192,6 +267,11 @@ export default function CollaboratorCalendarHome({
   const [selectedDate, setSelectedDate] = useState(today);
   const [modalState, setModalState] = useState<WorkDayModalState>(null);
   const [entryTimeDraft, setEntryTimeDraft] = useState<string | null>(null);
+  const [detailRecord, setDetailRecord] = useState<TimeRecord | null>(null);
+  const [switchingActivity, setSwitchingActivity] = useState(false);
+  const [switchType, setSwitchType] = useState<"project" | "other">("project");
+  const [switchProjectId, setSwitchProjectId] = useState(projects[0]?.id ?? "");
+  const [switchCategory, setSwitchCategory] = useState(OTHER_ACTIVITY_CATEGORIES[0]);
   const visibleWeek = weekDates(selectedDate);
   const currentRecord = store.timeRecords.find(
     (record) => record.colaboradorId === session.id && record.date === today,
@@ -214,6 +294,21 @@ export default function CollaboratorCalendarHome({
       },
       { successMessage: "Dia de trabalho iniciado." },
     );
+  }
+
+  async function switchActivity() {
+    await onMutate(
+      "/api/time-records",
+      {
+        action: "switch-activity",
+        colaboradorId: session.id,
+        ...(switchType === "project"
+          ? { projectId: switchProjectId }
+          : { category: switchCategory }),
+      },
+      { successMessage: "Atividade atualizada." },
+    );
+    setSwitchingActivity(false);
   }
 
   async function updateEntryTime() {
@@ -291,6 +386,87 @@ export default function CollaboratorCalendarHome({
                   <Save size={15} />
                   Salvar
                 </button>
+              </div>
+              <div className="mt-3">
+                {!switchingActivity ? (
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="min-w-0">
+                      <span className={labelClass}>Atividade atual</span>
+                      <p className="mt-0.5 truncate text-sm font-medium text-blue-950">
+                        {currentActivityLabel(currentRecord, store)}
+                      </p>
+                    </div>
+                    <button
+                      className="shrink-0 rounded-md border border-blue-200 bg-white px-3 py-1.5 text-xs font-semibold text-blue-800 transition hover:bg-blue-100"
+                      type="button"
+                      onClick={() => setSwitchingActivity(true)}
+                    >
+                      Trocar
+                    </button>
+                  </div>
+                ) : (
+                  <div className="space-y-2">
+                    <div className="flex gap-4">
+                      <label className="flex items-center gap-1.5 text-sm text-blue-900">
+                        <input
+                          checked={switchType === "project"}
+                          className="accent-blue-700"
+                          name="switch-type"
+                          type="radio"
+                          onChange={() => setSwitchType("project")}
+                        />
+                        Projeto
+                      </label>
+                      <label className="flex items-center gap-1.5 text-sm text-blue-900">
+                        <input
+                          checked={switchType === "other"}
+                          className="accent-blue-700"
+                          name="switch-type"
+                          type="radio"
+                          onChange={() => setSwitchType("other")}
+                        />
+                        Outra atividade
+                      </label>
+                    </div>
+                    {switchType === "project" ? (
+                      <select
+                        className={inputClass}
+                        value={switchProjectId}
+                        onChange={(e) => setSwitchProjectId(e.target.value)}
+                      >
+                        {projects.map((p) => (
+                          <option key={p.id} value={p.id}>{p.nome}</option>
+                        ))}
+                      </select>
+                    ) : (
+                      <select
+                        className={inputClass}
+                        value={switchCategory}
+                        onChange={(e) => setSwitchCategory(e.target.value as typeof switchCategory)}
+                      >
+                        {OTHER_ACTIVITY_CATEGORIES.map((cat) => (
+                          <option key={cat} value={cat}>{cat}</option>
+                        ))}
+                      </select>
+                    )}
+                    <div className="flex gap-2">
+                      <button
+                        className="flex h-9 flex-1 items-center justify-center rounded-md bg-blue-700 text-sm font-semibold text-white transition hover:bg-blue-800"
+                        type="button"
+                        onClick={switchActivity}
+                      >
+                        Confirmar
+                      </button>
+                      <button
+                        className="flex h-9 flex-1 items-center justify-center rounded-md border border-blue-200 bg-white text-sm font-semibold text-blue-800 transition hover:bg-blue-100"
+                        type="button"
+                        onClick={() => setSwitchingActivity(false)}
+                      >
+                        Cancelar
+                      </button>
+                    </div>
+                  </div>
+                )}
               </div>
             </div>
           )}
@@ -403,6 +579,7 @@ export default function CollaboratorCalendarHome({
             setSelectedDate(date);
             setModalState({ mode: "manual", date });
           }}
+          onOpenDetail={setDetailRecord}
           onSelectDate={setSelectedDate}
         />
       </section>
@@ -420,6 +597,14 @@ export default function CollaboratorCalendarHome({
           )}
           onClose={() => setModalState(null)}
           onMutate={onMutate}
+        />
+      )}
+
+      {detailRecord && (
+        <TimeRecordDetailModal
+          record={detailRecord}
+          store={store}
+          onClose={() => setDetailRecord(null)}
         />
       )}
     </div>
@@ -509,6 +694,7 @@ function WorkWeekCalendar({
   store,
   today,
   onLaunch,
+  onOpenDetail,
   onSelectDate,
 }: {
   dates: string[];
@@ -517,6 +703,7 @@ function WorkWeekCalendar({
   store: StoreData;
   today: string;
   onLaunch: (date: string) => void;
+  onOpenDetail: (record: TimeRecord) => void;
   onSelectDate: (date: string) => void;
 }) {
   const hours = Array.from({ length: 11 }, (_, index) => index + 8);
@@ -620,6 +807,7 @@ function WorkWeekCalendar({
                     record={record}
                     rowHeight={rowHeight}
                     store={store}
+                    onOpenDetail={onOpenDetail}
                   />
                 ))}
                 {dayLog && (
@@ -656,37 +844,209 @@ function CalendarTimeBlock({
   record,
   rowHeight,
   store,
+  onOpenDetail,
 }: {
   record: TimeRecord;
   rowHeight: number;
   store: StoreData;
+  onOpenDetail: (record: TimeRecord) => void;
 }) {
-  const start = Math.max(8, getDateHour(record.entryAt));
-  const end = record.exitAt
-    ? getDateHour(record.exitAt)
-    : Math.max(start + 1, getDateHour(new Date().toISOString()));
-  const top = Math.max(0, (start - 8) * rowHeight);
-  const height = Math.max(46, Math.min((end - start) * rowHeight, 260));
+  const exitIso = record.exitAt ?? new Date().toISOString();
+
+  const segments = record.projectSegments?.length
+    ? record.projectSegments
+    : [{ type: "project" as const, projectId: record.projectId, startAt: record.entryAt }];
+
+  // Assign a stable color index per unique project (cycles through palette)
+  const uniqueProjectKeys = [...new Set(
+    segments.filter(s => s.type === "project").map(s => (s as { type: "project"; projectId: string }).projectId)
+  )];
+  const colorByProjectId = new Map(uniqueProjectKeys.map((id, i) => [id, i % SEGMENT_COLORS.length]));
 
   return (
-    <div
-      className={classNames(
-        "absolute left-2 right-2 overflow-hidden rounded-md border px-3 py-2 text-xs shadow-sm",
-        record.status === "aberto"
-          ? "border-blue-300 bg-blue-100 text-blue-950"
-          : "border-zinc-300 bg-zinc-100 text-zinc-700",
+    <>
+      {segments.map((seg, i) => {
+        const segEndIso = i < segments.length - 1 ? segments[i + 1].startAt : exitIso;
+        const startHour = getDateHour(seg.startAt);
+        const endHour = getDateHour(segEndIso);
+        const top = Math.max(0, (startHour - 8) * rowHeight);
+        const height = Math.max(8, (endHour - startHour) * rowHeight);
+
+        let breakOverlapMs = 0;
+        if (record.breakStartAt && record.breakEndAt) {
+          const bStart = new Date(record.breakStartAt).getTime();
+          const bEnd = new Date(record.breakEndAt).getTime();
+          const sStart = new Date(seg.startAt).getTime();
+          const sEnd = new Date(segEndIso).getTime();
+          breakOverlapMs = Math.max(0, Math.min(sEnd, bEnd) - Math.max(sStart, bStart));
+        }
+        const minutes = Math.max(0, Math.round(
+          (new Date(segEndIso).getTime() - new Date(seg.startAt).getTime() - breakOverlapMs) / 60_000,
+        ));
+
+        const label = seg.type === "project"
+          ? (findProject(store, seg.projectId)?.nome ?? "—")
+          : seg.category;
+
+        const colorClass = seg.type === "other"
+          ? OTHER_ACTIVITY_COLOR
+          : SEGMENT_COLORS[colorByProjectId.get(seg.projectId) ?? 0];
+
+        return (
+          <button
+            className={classNames(
+              "absolute left-2 right-2 overflow-hidden rounded-md border px-2 py-1 text-left text-xs shadow-sm transition",
+              colorClass,
+            )}
+            key={i}
+            style={{ top, height }}
+            type="button"
+            onClick={(e) => { e.stopPropagation(); onOpenDetail(record); }}
+          >
+            {height >= 28 && (
+              <p className="truncate font-semibold leading-tight">{label}</p>
+            )}
+            {height >= 52 && (
+              <p className="mt-0.5 tabular-nums opacity-75">
+                {formatTime(seg.startAt)} · {formatDuration(minutesToDuration(minutes))}
+              </p>
+            )}
+          </button>
+        );
+      })}
+
+      {record.breakStartAt && record.breakEndAt && (
+        <div
+          className="pointer-events-none absolute left-2 right-2 overflow-hidden rounded border border-dashed border-amber-400 bg-amber-50"
+          style={{
+            top: Math.max(0, (getDateHour(record.breakStartAt) - 8) * rowHeight),
+            height: Math.max(4, (getDateHour(record.breakEndAt) - getDateHour(record.breakStartAt)) * rowHeight),
+          }}
+        >
+          <p className="px-2 py-0.5 text-xs font-medium text-amber-700">Intervalo</p>
+        </div>
       )}
-      style={{ top, height }}
-    >
-      <p className="font-semibold">
-        {record.status === "aberto" ? "Trabalho iniciado" : "Dia finalizado"}
-      </p>
-      <p className="mt-1 truncate">
-        {formatTime(record.entryAt)} - {formatTime(record.exitAt)}
-      </p>
-      <p className="mt-1 truncate">
-        {findProject(store, record.projectId)?.nome ?? "Projeto principal"}
-      </p>
+    </>
+  );
+}
+
+function TimeRecordDetailModal({
+  record,
+  store,
+  onClose,
+}: {
+  record: TimeRecord;
+  store: StoreData;
+  onClose: () => void;
+}) {
+  const exitMs = record.exitAt ? new Date(record.exitAt).getTime() : Date.now();
+  const segments = record.projectSegments?.length
+    ? record.projectSegments
+    : [{ type: "project" as const, projectId: record.projectId, startAt: record.entryAt }];
+
+  const segmentsWithDuration = segments.map((seg, i) => {
+    const startMs = new Date(seg.startAt).getTime();
+    const endMs = i < segments.length - 1 ? new Date(segments[i + 1].startAt).getTime() : exitMs;
+
+    let breakOverlapMs = 0;
+    if (record.breakStartAt && record.breakEndAt) {
+      const bStart = new Date(record.breakStartAt).getTime();
+      const bEnd = new Date(record.breakEndAt).getTime();
+      breakOverlapMs = Math.max(0, Math.min(endMs, bEnd) - Math.max(startMs, bStart));
+    }
+
+    const minutes = Math.max(0, Math.round((endMs - startMs - breakOverlapMs) / 60_000));
+    const endIso = i < segments.length - 1 ? segments[i + 1].startAt : record.exitAt;
+    const label = seg.type === "project"
+      ? (findProject(store, seg.projectId)?.nome ?? "Projeto removido")
+      : seg.category;
+
+    return { seg, label, minutes, endIso };
+  });
+
+  const totalWorkedMinutes = segmentsWithDuration.reduce((acc, s) => acc + s.minutes, 0);
+
+  const breakMinutes = record.breakStartAt && record.breakEndAt
+    ? Math.round((new Date(record.breakEndAt).getTime() - new Date(record.breakStartAt).getTime()) / 60_000)
+    : 0;
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-zinc-950/45 px-4 py-6">
+      <div className="w-full max-w-md rounded-lg border border-zinc-200 bg-white p-5 shadow-xl">
+        <div className="mb-5 flex items-start justify-between gap-4">
+          <div>
+            <h2 className="text-lg font-semibold text-zinc-950">Resumo do dia</h2>
+            <p className="mt-1 text-sm text-zinc-500">{record.date}</p>
+          </div>
+          <button
+            className="flex h-8 w-8 items-center justify-center rounded-md text-zinc-500 transition hover:bg-zinc-100"
+            type="button"
+            onClick={onClose}
+          >
+            <X size={17} />
+          </button>
+        </div>
+
+        <div className="mb-5 grid grid-cols-3 gap-3 rounded-lg border border-zinc-200 bg-zinc-50 p-4">
+          <div>
+            <p className={labelClass}>Entrada</p>
+            <p className="mt-1 text-sm font-semibold text-zinc-950">{formatTime(record.entryAt)}</p>
+          </div>
+          <div>
+            <p className={labelClass}>Saída</p>
+            <p className="mt-1 text-sm font-semibold text-zinc-950">
+              {formatTime(record.exitAt) || "—"}
+            </p>
+          </div>
+          <div>
+            <p className={labelClass}>Total</p>
+            <p className="mt-1 text-sm font-semibold text-zinc-950">
+              {formatDuration(minutesToDuration(totalWorkedMinutes))}
+            </p>
+          </div>
+        </div>
+
+        <h3 className="mb-3 text-sm font-semibold text-zinc-950">Atividades</h3>
+        <div className="space-y-2">
+          {segmentsWithDuration.map(({ seg, label, minutes, endIso }, i) => (
+            <div
+              className="flex items-center gap-3 rounded-md border border-zinc-200 p-3"
+              key={i}
+            >
+              <div
+                className={classNames(
+                  "h-2.5 w-2.5 shrink-0 rounded-full",
+                  seg.type === "project" ? "bg-blue-500" : "bg-violet-500",
+                )}
+              />
+              <div className="min-w-0 flex-1">
+                <p className="truncate text-sm font-medium text-zinc-950">{label}</p>
+                <p className="mt-0.5 text-xs text-zinc-500">
+                  {formatTime(seg.startAt)} → {formatTime(endIso) || "agora"}
+                </p>
+              </div>
+              <p className="shrink-0 text-sm font-semibold tabular-nums text-zinc-950">
+                {formatDuration(minutesToDuration(minutes))}
+              </p>
+            </div>
+          ))}
+        </div>
+
+        {breakMinutes > 0 && (
+          <div className="mt-3 flex items-center gap-3 rounded-md border border-amber-200 bg-amber-50 p-3">
+            <div className="h-2.5 w-2.5 shrink-0 rounded-full bg-amber-400" />
+            <div className="min-w-0 flex-1">
+              <p className="text-sm font-medium text-amber-900">Intervalo</p>
+              <p className="mt-0.5 text-xs text-amber-700">
+                {formatTime(record.breakStartAt)} → {formatTime(record.breakEndAt)}
+              </p>
+            </div>
+            <p className="shrink-0 text-sm font-semibold tabular-nums text-amber-900">
+              {formatDuration(minutesToDuration(breakMinutes))}
+            </p>
+          </div>
+        )}
+      </div>
     </div>
   );
 }
@@ -744,36 +1104,32 @@ function WorkDayModal({
 }) {
   const existingLog = getDailyLog(store, session.id, date);
   const suggestedHours = mode === "close" ? minutesToDuration(workedMinutesUntilNow(timeRecord)) : "00:00";
-  const [projectRows, setProjectRows] = useState<ProjectRow[]>(() =>
-    existingLog?.projectAllocations.length
-      ? existingLog.projectAllocations.map((entry) => ({
-          projectId: entry.projectId,
-          hours: durationInputValue(entry.hours),
-          observation: entry.observation,
-        }))
-      : [
-          {
-            projectId: projects[0]?.id ?? "",
-            hours: durationInputValue(suggestedHours),
-            observation: "",
-          },
-        ],
-  );
-  const [activityRows, setActivityRows] = useState<ActivityRow[]>(() =>
-    existingLog?.otherActivityAllocations.length
-      ? existingLog.otherActivityAllocations.map((entry) => ({
-          category: entry.category,
-          hours: durationInputValue(entry.hours),
-          observation: entry.observation,
-        }))
-      : [
-          {
-            category: OTHER_ACTIVITY_CATEGORIES[0],
-            hours: "",
-            observation: "",
-          },
-        ],
-  );
+  const [projectRows, setProjectRows] = useState<ProjectRow[]>(() => {
+    if (existingLog?.projectAllocations.length) {
+      return existingLog.projectAllocations.map((entry) => ({
+        projectId: entry.projectId,
+        hours: durationInputValue(entry.hours),
+        observation: entry.observation,
+      }));
+    }
+    if (mode === "close" && timeRecord?.projectSegments?.length) {
+      return buildRowsFromSegments(timeRecord, projects).projectRows;
+    }
+    return [{ projectId: projects[0]?.id ?? "", hours: durationInputValue(suggestedHours), observation: "" }];
+  });
+  const [activityRows, setActivityRows] = useState<ActivityRow[]>(() => {
+    if (existingLog?.otherActivityAllocations.length) {
+      return existingLog.otherActivityAllocations.map((entry) => ({
+        category: entry.category,
+        hours: durationInputValue(entry.hours),
+        observation: entry.observation,
+      }));
+    }
+    if (mode === "close" && timeRecord?.projectSegments?.length) {
+      return buildRowsFromSegments(timeRecord, projects).activityRows;
+    }
+    return [{ category: OTHER_ACTIVITY_CATEGORIES[0], hours: "", observation: "" }];
+  });
   const [observation, setObservation] = useState(existingLog?.observation ?? "");
   const projectTotal = sumRows(projectRows);
   const activityTotal = sumRows(activityRows);

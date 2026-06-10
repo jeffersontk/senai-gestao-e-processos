@@ -1,11 +1,11 @@
 import { badRequest } from "@/lib/api";
 import { brazilDateTimeToIso, calculateWorkedHours, getBrazilDate } from "@/lib/date";
 import { readStore, updateStore } from "@/lib/store";
-import { TimeRecord } from "@/lib/types";
+import { OtherActivityCategory, TimeRecord, TimeRecordSegment } from "@/lib/types";
 
 export const dynamic = "force-dynamic";
 
-type TimeAction = "clock-in" | "break-start" | "break-end" | "clock-out" | "update-entry";
+type TimeAction = "clock-in" | "break-start" | "break-end" | "clock-out" | "update-entry" | "switch-activity";
 
 export async function GET() {
   const store = await readStore();
@@ -16,6 +16,7 @@ export async function POST(request: Request) {
   const body = (await request.json()) as {
     colaboradorId?: string;
     projectId?: string;
+    category?: OtherActivityCategory;
     action?: TimeAction;
     entryTime?: string;
     observation?: string;
@@ -56,6 +57,7 @@ export async function POST(request: Request) {
         colaboradorId: body.colaboradorId!,
         date: today,
         projectId: body.projectId,
+        projectSegments: [{ type: "project", projectId: body.projectId, startAt: now }],
         entryAt: now,
         totalHours: "00:00",
         observation: body.observation?.trim() ?? "",
@@ -69,6 +71,29 @@ export async function POST(request: Request) {
 
     if (!current || current.status !== "aberto") {
       error = "Não há ponto aberto para atualizar.";
+      return;
+    }
+
+    if (body.action === "switch-activity") {
+      const existingSegments: TimeRecordSegment[] = current.projectSegments?.length
+        ? current.projectSegments
+        : [{ type: "project", projectId: current.projectId, startAt: current.entryAt }];
+
+      let newSegment: TimeRecordSegment;
+      if (body.projectId) {
+        newSegment = { type: "project", projectId: body.projectId, startAt: now };
+      } else if (body.category) {
+        newSegment = { type: "other", category: body.category, startAt: now };
+      } else {
+        error = "Informe o projeto ou atividade.";
+        return;
+      }
+
+      draft.timeRecords[currentIndex] = {
+        ...current,
+        projectSegments: [...existingSegments, newSegment],
+        updatedAt: now,
+      };
       return;
     }
 

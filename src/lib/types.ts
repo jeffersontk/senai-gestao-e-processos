@@ -110,11 +110,16 @@ export type OtherActivityEntry = {
   updatedAt: string;
 };
 
+export type TimeRecordSegment =
+  | { type: "project"; projectId: string; startAt: string }
+  | { type: "other"; category: OtherActivityCategory; startAt: string };
+
 export type TimeRecord = {
   id: string;
   colaboradorId: string;
   date: string;
   projectId: string;
+  projectSegments?: TimeRecordSegment[];
   entryAt: string;
   breakStartAt?: string;
   breakEndAt?: string;
