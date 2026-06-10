@@ -1,6 +1,7 @@
 import { Prisma } from "@/generated/prisma/client";
+import { normalizeDuration } from "@/lib/duration";
 import { getPrisma } from "@/lib/prisma";
-import { StoreData } from "@/lib/types";
+import { DailyWorkLog, MonthlyEntry, OtherActivityEntry, StoreData, TimeRecord } from "@/lib/types";
 
 const stateId = process.env.SUPABASE_STATE_ID ?? "gestao-horas";
 
@@ -9,6 +10,7 @@ function createEmptyStore(): StoreData {
     users: [],
     projectTypes: [],
     projects: [],
+    projectAllocations: [],
     monthlyEntries: [],
     otherActivityEntries: [],
     timeRecords: [],
@@ -32,10 +34,49 @@ function isStoreData(value: unknown): value is StoreData {
 }
 
 function normalizeStore(store: StoreData): StoreData {
+  const dailyWorkLogs = Array.isArray(store.dailyWorkLogs)
+    ? store.dailyWorkLogs.map(normalizeDailyWorkLog)
+    : [];
+
   return {
     ...store,
-    dailyWorkLogs: Array.isArray(store.dailyWorkLogs) ? store.dailyWorkLogs : [],
+    projectAllocations: Array.isArray(store.projectAllocations)
+      ? store.projectAllocations
+      : [],
+    monthlyEntries: store.monthlyEntries.map(normalizeMonthlyEntry),
+    otherActivityEntries: store.otherActivityEntries.map(normalizeOtherActivityEntry),
+    timeRecords: store.timeRecords.map(normalizeTimeRecord),
+    dailyWorkLogs,
     mmpRecords: Array.isArray(store.mmpRecords) ? store.mmpRecords : [],
+  };
+}
+
+function normalizeMonthlyEntry(entry: MonthlyEntry): MonthlyEntry {
+  return { ...entry, hours: normalizeDuration(entry.hours) };
+}
+
+function normalizeOtherActivityEntry(entry: OtherActivityEntry): OtherActivityEntry {
+  return { ...entry, hours: normalizeDuration(entry.hours) };
+}
+
+function normalizeTimeRecord(record: TimeRecord): TimeRecord {
+  return { ...record, totalHours: normalizeDuration(record.totalHours) };
+}
+
+function normalizeDailyWorkLog(log: DailyWorkLog): DailyWorkLog {
+  return {
+    ...log,
+    projectAllocations: log.projectAllocations.map((entry) => ({
+      ...entry,
+      hours: normalizeDuration(entry.hours),
+    })),
+    otherActivityAllocations: log.otherActivityAllocations.map((entry) => ({
+      ...entry,
+      hours: normalizeDuration(entry.hours),
+    })),
+    totalProjectHours: normalizeDuration(log.totalProjectHours),
+    totalOtherActivityHours: normalizeDuration(log.totalOtherActivityHours),
+    totalHours: normalizeDuration(log.totalHours),
   };
 }
 

@@ -10,7 +10,7 @@ export const dynamic = "force-dynamic";
 
 type OtherActivityInput = {
   category: OtherActivityCategory;
-  hours: number;
+  hours: string;
   observation?: string;
 };
 

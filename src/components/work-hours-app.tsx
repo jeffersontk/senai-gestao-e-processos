@@ -22,9 +22,23 @@ import {
   X,
   type LucideIcon,
 } from "lucide-react";
-import { useEffect, useMemo, useState, type FormEvent, type ReactNode } from "react";
+import { Fragment, useEffect, useMemo, useState, type FormEvent, type ReactNode } from "react";
 import CollaboratorCalendarHome from "@/components/collaborator-calendar-home";
 import MmpAdminModule from "@/components/mmp-admin-module";
+import {
+  isProjectAllocatedToUser,
+  projectAllocationUserIds,
+  sortProjectsByAllocation,
+} from "@/lib/allocations";
+import {
+  durationInputValue,
+  durationToMinutes,
+  formatDuration,
+  formatDurationFromMinutes,
+  minutesToDuration,
+  normalizeDurationInput,
+  sumDurationMinutes,
+} from "@/lib/duration";
 import {
   MONTHS,
   OTHER_ACTIVITY_CATEGORIES,
@@ -60,12 +74,16 @@ const emptyStore: StoreData = {
   users: [],
   projectTypes: [],
   projects: [],
+  projectAllocations: [],
   monthlyEntries: [],
   otherActivityEntries: [],
   timeRecords: [],
   dailyWorkLogs: [],
   mmpRecords: [],
 };
+const sessionStorageKey = "senai-gestao-session-user-id";
+const viewStorageKey = "senai-gestao-active-view";
+const views: View[] = ["dashboard", "clock", "monthly", "projects", "users", "reports", "mmp", "password"];
 
 const inputClass =
   "h-10 w-full rounded-md border border-zinc-200 bg-white px-3 text-sm text-zinc-900 outline-none transition focus:border-blue-500 focus:ring-2 focus:ring-blue-100";
@@ -85,12 +103,33 @@ function getCurrentReference() {
   };
 }
 
-function formatHours(value: number) {
-  return `${value.toLocaleString("pt-BR", { maximumFractionDigits: 2 })}h`;
+function defaultViewForRole(role: Role): View {
+  return role === "ADMIN" ? "dashboard" : "clock";
 }
 
-function sumHours<T>(items: T[], pick: (item: T) => number) {
-  return items.reduce((total, item) => total + pick(item), 0);
+function canAccessView(role: Role, view: View) {
+  if (!views.includes(view)) return false;
+  if (view === "password") return true;
+  if (view === "clock") return role === "COLABORADOR";
+  if (view === "monthly") return true;
+  if (role === "ADMIN") return true;
+  return false;
+}
+
+function resolveStoredView(role: Role, view: string | null): View {
+  const candidate = view as View | null;
+  if (candidate && canAccessView(role, candidate)) return candidate;
+  return defaultViewForRole(role);
+}
+
+function formatHours(value: unknown) {
+  return typeof value === "number"
+    ? formatDurationFromMinutes(value)
+    : formatDuration(value);
+}
+
+function sumHours<T>(items: T[], pick: (item: T) => unknown) {
+  return sumDurationMinutes(items, pick);
 }
 
 function collaboratorUsers(store: StoreData) {
@@ -170,7 +209,20 @@ export default function WorkHoursApp() {
       try {
         const response = await fetch("/api/bootstrap");
         const data = (await response.json()) as StoreData;
-        if (mounted) setStore({ ...emptyStore, ...data });
+        const nextStore = { ...emptyStore, ...data };
+        if (mounted) {
+          setStore(nextStore);
+          const storedUserId = window.localStorage.getItem(sessionStorageKey);
+          const storedView = window.localStorage.getItem(viewStorageKey);
+          const storedUser = nextStore.users.find(
+            (user) => user.id === storedUserId && user.status === "ativo",
+          );
+
+          if (storedUser) {
+            setSession(storedUser);
+            setActiveView(resolveStoredView(storedUser.role, storedView));
+          }
+        }
       } catch {
         if (mounted) {
           setNotice({ type: "error", message: "Não foi possível carregar os dados." });
@@ -202,7 +254,10 @@ export default function WorkHoursApp() {
       }
 
       setSession(payload.user);
-      setActiveView(payload.user.role === "ADMIN" ? "dashboard" : "clock");
+      const nextView = defaultViewForRole(payload.user.role);
+      setActiveView(nextView);
+      window.localStorage.setItem(sessionStorageKey, payload.user.id);
+      window.localStorage.setItem(viewStorageKey, nextView);
     } catch (error) {
       setNotice({
         type: "error",
@@ -230,6 +285,16 @@ export default function WorkHoursApp() {
       }
 
       setStore({ ...emptyStore, ...payload.store });
+      if (session) {
+        const updatedUser = payload.store.users.find((user) => user.id === session.id);
+        if (updatedUser?.status === "ativo") {
+          setSession(updatedUser);
+        } else if (updatedUser) {
+          setSession(null);
+          window.localStorage.removeItem(sessionStorageKey);
+          window.localStorage.removeItem(viewStorageKey);
+        }
+      }
       if (!options.silent) {
         setNotice({ type: "success", message: options.successMessage ?? "Salvo." });
       }
@@ -252,13 +317,20 @@ export default function WorkHoursApp() {
   }
 
   if (!session) {
-    return <LoginScreen busy={busy} notice={notice} store={store} onLogin={login} />;
+    return <LoginScreen busy={busy} notice={notice} onLogin={login} />;
   }
 
   return (
     <div className="min-h-screen bg-[#f4f6f8] text-zinc-950">
       <div className="flex min-h-screen flex-col md:flex-row">
-        <Sidebar activeView={activeView} role={session.role} onNavigate={setActiveView} />
+        <Sidebar
+          activeView={activeView}
+          role={session.role}
+          onNavigate={(view) => {
+            setActiveView(view);
+            window.localStorage.setItem(viewStorageKey, view);
+          }}
+        />
         <div className="flex min-w-0 flex-1 flex-col">
           <Header
             activeView={activeView}
@@ -268,6 +340,8 @@ export default function WorkHoursApp() {
             onLogout={() => {
               setSession(null);
               setNotice(null);
+              window.localStorage.removeItem(sessionStorageKey);
+              window.localStorage.removeItem(viewStorageKey);
             }}
           />
           <main className="flex-1 overflow-x-hidden px-4 py-5 sm:px-6 lg:px-8">
@@ -279,14 +353,17 @@ export default function WorkHoursApp() {
                 onMutate={mutateStore}
               />
             )}
-            {activeView === "clock" && (
+            {activeView === "clock" && session.role === "COLABORADOR" && (
               <CollaboratorCalendarHome
                 session={session}
                 store={store}
                 onMutate={mutateStore}
               />
             )}
-            {activeView === "monthly" && (
+            {activeView === "monthly" && session.role === "ADMIN" && (
+              <AdminMonthlyReviewView store={store} onMutate={mutateStore} />
+            )}
+            {activeView === "monthly" && session.role === "COLABORADOR" && (
               <MonthlyLaunchView session={session} store={store} onMutate={mutateStore} />
             )}
             {activeView === "projects" && session.role === "ADMIN" && (
@@ -322,12 +399,10 @@ export default function WorkHoursApp() {
 function LoginScreen({
   busy,
   notice,
-  store,
   onLogin,
 }: {
   busy: boolean;
   notice: Notice;
-  store: StoreData;
   onLogin: (email: string, password: string) => Promise<void>;
 }) {
   const [email, setEmail] = useState("");
@@ -369,25 +444,6 @@ function LoginScreen({
               onChange={setPassword}
             />
           </div>
-          <div className="mt-5 grid gap-2">
-            {store.users
-              .filter((user) => user.status === "ativo")
-              .slice(0, 4)
-              .map((user) => (
-                <button
-                  className="flex items-center justify-between rounded-md border border-zinc-200 px-3 py-2 text-left text-sm transition hover:border-blue-300 hover:bg-blue-50"
-                  key={user.id}
-                  type="button"
-                  onClick={() => setEmail(user.email)}
-                >
-                  <span>
-                    <span className="block font-medium text-zinc-900">{user.nome}</span>
-                    <span className="text-zinc-500">{user.email}</span>
-                  </span>
-                  <StatusBadge value={user.role} />
-                </button>
-              ))}
-          </div>
           {notice && <NoticeBox notice={notice} />}
           <button
             className="mt-6 flex h-10 w-full items-center justify-center gap-2 rounded-md bg-blue-700 px-4 text-sm font-semibold text-white transition hover:bg-blue-800 disabled:cursor-not-allowed disabled:bg-zinc-300"
@@ -414,7 +470,7 @@ function Sidebar({
 }) {
   const items: Array<{ view: View; label: string; icon: LucideIcon; roles: Role[] }> = [
     { view: "dashboard", label: "Dashboard", icon: LayoutDashboard, roles: ["ADMIN"] },
-    { view: "clock", label: "Calendário", icon: Clock, roles: ["ADMIN", "COLABORADOR"] },
+    { view: "clock", label: "Calendário", icon: Clock, roles: ["COLABORADOR"] },
     {
       view: "monthly",
       label: "Lançamentos",
@@ -754,22 +810,31 @@ function MonthlyActivityMatrix({
   store: StoreData;
 }) {
   return (
-    <section className="rounded-lg border border-zinc-200 bg-white p-4">
+    <section className="min-w-0 overflow-hidden rounded-lg border border-zinc-200 bg-white p-4">
       <h2 className="mb-4 text-sm font-semibold text-zinc-950">Matriz mensal por projeto</h2>
-      <div className="overflow-x-auto">
-        <table className="w-full min-w-[900px] border-collapse text-sm">
+      <div className="max-w-full overflow-x-auto pb-2">
+        <table className="w-max min-w-full border-collapse text-sm">
           <thead>
             <tr className="border-b border-zinc-200 text-left text-xs uppercase text-zinc-500">
-              <th className="sticky left-0 bg-white py-3 pr-4 font-semibold">Colaborador</th>
+              <th className="sticky left-0 z-10 min-w-52 bg-white py-3 pr-4 font-semibold shadow-[1px_0_0_#e4e4e7]">Colaborador</th>
               {projects.map((project) => (
-                <th className="px-3 py-3 text-right font-semibold" key={project.id}>
-                  <span className="block text-zinc-800">{project.nome}</span>
+                <th className="w-40 min-w-40 max-w-40 px-3 py-3 text-right font-semibold" key={project.id}>
+                  <span
+                    className="block overflow-hidden whitespace-normal break-words leading-4 text-zinc-800"
+                    style={{
+                      display: "-webkit-box",
+                      WebkitBoxOrient: "vertical",
+                      WebkitLineClamp: 2,
+                    }}
+                  >
+                    {project.nome}
+                  </span>
                   <span className="text-[11px] normal-case text-zinc-400">
                     {findProjectType(store, project.typeId)?.nome ?? "Sem tipo"}
                   </span>
                 </th>
               ))}
-              <th className="px-3 py-3 text-right font-semibold">Total</th>
+              <th className="sticky right-0 z-10 min-w-28 bg-white px-3 py-3 text-right font-semibold shadow-[-1px_0_0_#e4e4e7]">Total</th>
             </tr>
           </thead>
           <tbody>
@@ -779,19 +844,19 @@ function MonthlyActivityMatrix({
 
               return (
                 <tr className="border-b border-zinc-100 last:border-0" key={user.id}>
-                  <td className="sticky left-0 bg-white py-3 pr-4 font-medium text-zinc-950">{user.nome}</td>
+                  <td className="sticky left-0 z-10 min-w-52 bg-white py-3 pr-4 font-medium text-zinc-950 shadow-[1px_0_0_#e4e4e7]">{user.nome}</td>
                   {projects.map((project) => {
                     const value = sumHours(
                       rowEntries.filter((entry) => entry.projectId === project.id),
                       (entry) => entry.hours,
                     );
                     return (
-                      <td className="px-3 py-3 text-right tabular-nums text-zinc-700" key={project.id}>
-                        {value ? formatHours(value) : "0h"}
+                      <td className="w-40 min-w-40 max-w-40 px-3 py-3 text-right tabular-nums text-zinc-700" key={project.id}>
+                        {formatHours(value)}
                       </td>
                     );
                   })}
-                  <td className="px-3 py-3 text-right font-semibold tabular-nums text-zinc-950">{formatHours(total)}</td>
+                  <td className="sticky right-0 z-10 min-w-28 bg-white px-3 py-3 text-right font-semibold tabular-nums text-zinc-950 shadow-[-1px_0_0_#e4e4e7]">{formatHours(total)}</td>
                 </tr>
               );
             })}
@@ -832,7 +897,7 @@ function OtherActivitiesMatrix({ collaborators, entries }: { collaborators: User
                     );
                     return (
                       <td className="px-3 py-3 text-right tabular-nums text-zinc-700" key={category}>
-                        {value ? formatHours(value) : "0h"}
+                        {formatHours(value)}
                       </td>
                     );
                   })}
@@ -889,6 +954,372 @@ function DailyLogsTable({ store }: { store: StoreData }) {
   );
 }
 
+type MonthlySubmission = {
+  key: string;
+  user: User;
+  entries: MonthlyEntry[];
+  otherEntries: OtherActivityEntry[];
+  status: MonthlyEntryStatus | "misto";
+  projectTotal: number;
+  otherTotal: number;
+  total: number;
+  updatedAt: string;
+};
+
+function AdminMonthlyReviewView({
+  store,
+  onMutate,
+}: {
+  store: StoreData;
+  onMutate: (path: string, body: unknown, options?: MutationOptions) => Promise<StoreData>;
+}) {
+  const initialReference = useMemo(() => getCurrentReference(), []);
+  const [reference, setReference] = useState(initialReference);
+  const [statusFilter, setStatusFilter] = useState<MonthlyEntryStatus | "all">("enviado");
+  const [selectedKey, setSelectedKey] = useState<string | null>(null);
+  const submissions = getMonthlySubmissions(store, reference, statusFilter);
+
+  async function updateSubmissionStatus(
+    submission: MonthlySubmission,
+    status: MonthlyEntryStatus,
+  ) {
+    await onMutate(
+      "/api/monthly-entries",
+      { ids: submission.entries.map((entry) => entry.id), status },
+      {
+        method: "PUT",
+        successMessage:
+          status === "aprovado"
+            ? "Lançamento aprovado."
+            : status === "rejeitado"
+              ? "Lançamento rejeitado e liberado para ajuste."
+              : "Lançamento liberado para ajuste.",
+      },
+    );
+  }
+
+  return (
+    <div className="space-y-5">
+      <section className="rounded-lg border border-zinc-200 bg-white p-4">
+        <div className="grid gap-3 lg:grid-cols-[1fr_220px] lg:items-end">
+          <MonthYearFilter
+            month={reference.referenceMonth}
+            year={reference.referenceYear}
+            onChange={(next) => {
+              setReference(next);
+              setSelectedKey(null);
+            }}
+          />
+          <SelectField
+            label="Status"
+            value={statusFilter}
+            onChange={(value) => {
+              setStatusFilter(value as MonthlyEntryStatus | "all");
+              setSelectedKey(null);
+            }}
+          >
+            <option value="enviado">Enviados</option>
+            <option value="reaberto">Liberados para ajuste</option>
+            <option value="rejeitado">Rejeitados</option>
+            <option value="aprovado">Aprovados</option>
+            <option value="rascunho">Rascunhos</option>
+            <option value="all">Todos</option>
+          </SelectField>
+        </div>
+      </section>
+
+      <section className="rounded-lg border border-zinc-200 bg-white p-4">
+        <div className="mb-4 flex flex-col gap-1">
+          <h2 className="text-sm font-semibold text-zinc-950">
+            Revisão de lançamentos
+          </h2>
+          <p className="text-sm text-zinc-500">
+            Aprove, rejeite ou libere o lançamento para ajustes do colaborador.
+          </p>
+        </div>
+        <div className="overflow-x-auto">
+          <table className="w-full min-w-[980px] text-sm">
+            <thead>
+              <tr className="border-b border-zinc-200 text-left text-xs uppercase text-zinc-500">
+                <th className="py-3 pr-4">Colaborador</th>
+                <th className="px-3 py-3">Status</th>
+                <th className="px-3 py-3 text-right">Projetos</th>
+                <th className="px-3 py-3 text-right">Atividades</th>
+                <th className="px-3 py-3 text-right">Total</th>
+                <th className="px-3 py-3">Atualizado</th>
+                <th className="px-3 py-3 text-right">Ações</th>
+              </tr>
+            </thead>
+            <tbody>
+              {submissions.map((submission) => {
+                const expanded = selectedKey === submission.key;
+
+                return (
+                  <Fragment key={submission.key}>
+                    <tr
+                      className={classNames(
+                        "border-b border-zinc-100",
+                        expanded && "bg-blue-50/40",
+                      )}
+                    >
+                      <td className="py-3 pr-4">
+                        <p className="font-medium text-zinc-950">{submission.user.nome}</p>
+                        <p className="text-xs text-zinc-500">{submission.user.email}</p>
+                      </td>
+                      <td className="px-3 py-3">
+                        <StatusBadge value={submission.status} />
+                      </td>
+                      <td className="px-3 py-3 text-right tabular-nums">
+                        {formatHours(submission.projectTotal)}
+                      </td>
+                      <td className="px-3 py-3 text-right tabular-nums">
+                        {formatHours(submission.otherTotal)}
+                      </td>
+                      <td className="px-3 py-3 text-right font-semibold tabular-nums text-zinc-950">
+                        {formatHours(submission.total)}
+                      </td>
+                      <td className="px-3 py-3 text-zinc-600">
+                        {formatDateTimeLabel(submission.updatedAt)}
+                      </td>
+                      <td className="px-3 py-3">
+                        <div className="flex justify-end gap-2">
+                          <button
+                            className="flex h-9 items-center gap-2 rounded-md border border-zinc-200 bg-white px-3 text-sm font-semibold text-zinc-700 transition hover:bg-zinc-100"
+                            type="button"
+                            onClick={() => setSelectedKey(expanded ? null : submission.key)}
+                          >
+                            <FileText size={15} />
+                            {expanded ? "Ocultar" : "Detalhes"}
+                          </button>
+                          <button
+                            className="flex h-9 items-center gap-2 rounded-md bg-emerald-700 px-3 text-sm font-semibold text-white transition hover:bg-emerald-800 disabled:cursor-not-allowed disabled:bg-zinc-300"
+                            disabled={!submission.entries.length || submission.status === "aprovado"}
+                            type="button"
+                            onClick={() => updateSubmissionStatus(submission, "aprovado")}
+                          >
+                            <CheckCircle2 size={15} />
+                            Aprovar
+                          </button>
+                          <button
+                            className="flex h-9 items-center gap-2 rounded-md border border-red-200 bg-white px-3 text-sm font-semibold text-red-700 transition hover:bg-red-50 disabled:cursor-not-allowed disabled:text-zinc-300"
+                            disabled={!submission.entries.length || submission.status === "rejeitado"}
+                            type="button"
+                            onClick={() => updateSubmissionStatus(submission, "rejeitado")}
+                          >
+                            <X size={15} />
+                            Rejeitar
+                          </button>
+                          <button
+                            className="flex h-9 items-center gap-2 rounded-md border border-zinc-200 bg-white px-3 text-sm font-semibold text-zinc-700 transition hover:bg-zinc-100 disabled:cursor-not-allowed disabled:text-zinc-300"
+                            disabled={!submission.entries.length || submission.status === "reaberto"}
+                            type="button"
+                            onClick={() => updateSubmissionStatus(submission, "reaberto")}
+                          >
+                            <RotateCcw size={15} />
+                            Ajuste
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                    {expanded && (
+                      <tr className="border-b border-zinc-100 bg-blue-50/20">
+                        <td className="px-0 py-0" colSpan={7}>
+                          <MonthlySubmissionDetails store={store} submission={submission} />
+                        </td>
+                      </tr>
+                    )}
+                  </Fragment>
+                );
+              })}
+              {!submissions.length && (
+                <tr>
+                  <td className="py-8 text-center text-zinc-500" colSpan={7}>
+                    Nenhum lançamento encontrado para o filtro selecionado.
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+    </div>
+  );
+}
+
+function getMonthlySubmissions(
+  store: StoreData,
+  reference: { referenceMonth: number; referenceYear: number },
+  statusFilter: MonthlyEntryStatus | "all",
+) {
+  return collaboratorUsers(store)
+    .map((user): MonthlySubmission | null => {
+      const entries = store.monthlyEntries.filter(
+        (entry) =>
+          entry.colaboradorId === user.id &&
+          entry.referenceMonth === reference.referenceMonth &&
+          entry.referenceYear === reference.referenceYear,
+      );
+      const otherEntries = store.otherActivityEntries.filter(
+        (entry) =>
+          entry.colaboradorId === user.id &&
+          entry.referenceMonth === reference.referenceMonth &&
+          entry.referenceYear === reference.referenceYear,
+      );
+
+      if (!entries.length && !otherEntries.length) return null;
+
+      const status = resolveMonthlySubmissionStatus(entries);
+      if (statusFilter !== "all" && status !== statusFilter) return null;
+
+      const projectTotal = sumHours(entries, (entry) => entry.hours);
+      const otherTotal = sumHours(otherEntries, (entry) => entry.hours);
+      const updatedAt = [...entries, ...otherEntries]
+        .map((entry) => entry.updatedAt)
+        .sort()
+        .at(-1) ?? "";
+
+      return {
+        key: `${user.id}-${reference.referenceMonth}-${reference.referenceYear}`,
+        user,
+        entries,
+        otherEntries,
+        status,
+        projectTotal,
+        otherTotal,
+        total: projectTotal + otherTotal,
+        updatedAt,
+      };
+    })
+    .filter((submission): submission is MonthlySubmission => Boolean(submission))
+    .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+}
+
+function resolveMonthlySubmissionStatus(entries: MonthlyEntry[]): MonthlySubmission["status"] {
+  if (!entries.length) return "rascunho";
+
+  const statuses = new Set(entries.map((entry) => entry.status));
+  if (statuses.size === 1) return entries[0].status;
+  if (statuses.has("enviado")) return "enviado";
+  if (statuses.has("rejeitado")) return "rejeitado";
+  if (statuses.has("reaberto")) return "reaberto";
+  if (statuses.has("rascunho")) return "rascunho";
+  return "misto";
+}
+
+function MonthlySubmissionDetails({
+  store,
+  submission,
+}: {
+  store: StoreData;
+  submission: MonthlySubmission;
+}) {
+  const projectEntries = submission.entries.filter(
+    (entry) => durationToMinutes(entry.hours) > 0,
+  );
+  const otherEntries = submission.otherEntries.filter(
+    (entry) => durationToMinutes(entry.hours) > 0,
+  );
+
+  return (
+    <section className="grid gap-5 xl:grid-cols-2">
+      <div className="rounded-lg border border-zinc-200 bg-white p-4">
+        <h2 className="text-sm font-semibold text-zinc-950">
+          Projetos de {submission.user.nome}
+        </h2>
+        <div className="mt-4 overflow-x-auto">
+          <table className="w-full min-w-[620px] text-sm">
+            <thead>
+              <tr className="border-b border-zinc-200 text-left text-xs uppercase text-zinc-500">
+                <th className="py-3 pr-4">Projeto</th>
+                <th className="px-3 py-3">Tipo</th>
+                <th className="px-3 py-3 text-right">Horas</th>
+                <th className="px-3 py-3">Observação</th>
+              </tr>
+            </thead>
+            <tbody>
+              {projectEntries.map((entry) => {
+                const project = findProject(store, entry.projectId);
+                return (
+                  <tr className="border-b border-zinc-100 last:border-0" key={entry.id}>
+                    <td className="py-3 pr-4 font-medium text-zinc-950">
+                      {project?.nome ?? "Projeto removido"}
+                    </td>
+                    <td className="px-3 py-3 text-zinc-600">
+                      {project ? findProjectType(store, project.typeId)?.nome ?? "Sem tipo" : "—"}
+                    </td>
+                    <td className="px-3 py-3 text-right tabular-nums">
+                      {formatHours(entry.hours)}
+                    </td>
+                    <td className="px-3 py-3 text-zinc-600">
+                      {entry.observation || "—"}
+                    </td>
+                  </tr>
+                );
+              })}
+              {!projectEntries.length && (
+                <tr>
+                  <td className="py-6 text-center text-zinc-500" colSpan={4}>
+                    Nenhuma hora em projeto.
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <div className="rounded-lg border border-zinc-200 bg-white p-4">
+        <h2 className="text-sm font-semibold text-zinc-950">
+          Demais atividades
+        </h2>
+        <div className="mt-4 overflow-x-auto">
+          <table className="w-full min-w-[520px] text-sm">
+            <thead>
+              <tr className="border-b border-zinc-200 text-left text-xs uppercase text-zinc-500">
+                <th className="py-3 pr-4">Categoria</th>
+                <th className="px-3 py-3 text-right">Horas</th>
+                <th className="px-3 py-3">Observação</th>
+              </tr>
+            </thead>
+            <tbody>
+              {otherEntries.map((entry) => (
+                <tr className="border-b border-zinc-100 last:border-0" key={entry.id}>
+                  <td className="py-3 pr-4 font-medium text-zinc-950">
+                    {entry.category}
+                  </td>
+                  <td className="px-3 py-3 text-right tabular-nums">
+                    {formatHours(entry.hours)}
+                  </td>
+                  <td className="px-3 py-3 text-zinc-600">
+                    {entry.observation || "—"}
+                  </td>
+                </tr>
+              ))}
+              {!otherEntries.length && (
+                <tr>
+                  <td className="py-6 text-center text-zinc-500" colSpan={3}>
+                    Nenhuma hora em demais atividades.
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function formatDateTimeLabel(value?: string) {
+  if (!value) return "—";
+
+  return new Intl.DateTimeFormat("pt-BR", {
+    dateStyle: "short",
+    timeStyle: "short",
+  }).format(new Date(value));
+}
+
 function MonthlyLaunchView({
   session,
   store,
@@ -903,7 +1334,11 @@ function MonthlyLaunchView({
   const [collaboratorId, setCollaboratorId] = useState(
     session.role === "ADMIN" ? collaboratorUsers(store)[0]?.id ?? session.id : session.id,
   );
-  const projects = store.projects.filter((project) => project.status === "ativo");
+  const projects = sortProjectsByAllocation(
+    store.projects.filter((project) => project.status === "ativo"),
+    store,
+    collaboratorId,
+  );
   const existingMonthly = store.monthlyEntries.filter(
     (entry) =>
       entry.colaboradorId === collaboratorId &&
@@ -962,17 +1397,57 @@ function MonthlyLaunchForm({
   const [projectRows, setProjectRows] = useState(() =>
     projects.map((project) => {
       const entry = existingMonthly.find((item) => item.projectId === project.id);
-      return { projectId: project.id, hours: entry ? String(entry.hours) : "", observation: entry?.observation ?? "" };
+      return { projectId: project.id, hours: durationInputValue(entry?.hours), observation: entry?.observation ?? "" };
     }),
   );
   const [activityRows, setActivityRows] = useState(() =>
     OTHER_ACTIVITY_CATEGORIES.map((category) => {
       const entry = existingOther.find((item) => item.category === category);
-      return { category, hours: entry ? String(entry.hours) : "", observation: entry?.observation ?? "" };
+      return { category, hours: durationInputValue(entry?.hours), observation: entry?.observation ?? "" };
     }),
   );
-  const projectTotal = sumHours(projectRows, (row) => Number(row.hours) || 0);
-  const activityTotal = sumHours(activityRows, (row) => Number(row.hours) || 0);
+  const [bulkProjectId, setBulkProjectId] = useState(projects[0]?.id ?? "");
+  const [bulkHours, setBulkHours] = useState("");
+  const [bulkObservation, setBulkObservation] = useState("");
+  const [bulkMode, setBulkMode] = useState<"replace" | "add">("replace");
+  const selectedBulkProjectId = projects.some((project) => project.id === bulkProjectId)
+    ? bulkProjectId
+    : projects[0]?.id ?? "";
+  const normalizedBulkHours = normalizeDurationInput(bulkHours);
+  const projectTotal = sumHours(projectRows, (row) => row.hours);
+  const activityTotal = sumHours(activityRows, (row) => row.hours);
+
+  function applyBulkProjectHours() {
+    if (!selectedBulkProjectId || normalizedBulkHours === "00:00") return;
+
+    setProjectRows((currentRows) => {
+      const index = currentRows.findIndex((row) => row.projectId === selectedBulkProjectId);
+      const currentRow = currentRows[index] ?? {
+        projectId: selectedBulkProjectId,
+        hours: "",
+        observation: "",
+      };
+      const nextHours =
+        bulkMode === "add"
+          ? minutesToDuration(
+              durationToMinutes(currentRow.hours) + durationToMinutes(normalizedBulkHours),
+            )
+          : normalizedBulkHours;
+      const nextRow = {
+        ...currentRow,
+        hours: nextHours,
+        observation: bulkObservation.trim() || currentRow.observation,
+      };
+
+      if (index < 0) return [...currentRows, nextRow];
+
+      const nextRows = [...currentRows];
+      nextRows[index] = nextRow;
+      return nextRows;
+    });
+    setBulkHours("");
+    setBulkObservation("");
+  }
 
   async function save(status: MonthlyEntryStatus) {
     await onMutate(
@@ -984,7 +1459,7 @@ function MonthlyLaunchForm({
         status,
         entries: projectRows.map((row) => ({
           projectId: row.projectId,
-          hours: Number(row.hours) || 0,
+          hours: normalizeDurationInput(row.hours),
           observation: row.observation,
         })),
       },
@@ -998,7 +1473,7 @@ function MonthlyLaunchForm({
         referenceYear: reference.referenceYear,
         entries: activityRows.map((row) => ({
           category: row.category,
-          hours: Number(row.hours) || 0,
+          hours: normalizeDurationInput(row.hours),
           observation: row.observation,
         })),
       },
@@ -1009,24 +1484,113 @@ function MonthlyLaunchForm({
   return (
     <div className="space-y-5">
       <section className="rounded-lg border border-zinc-200 bg-white p-4">
-        <div className="grid gap-3 lg:grid-cols-[1fr_1fr_auto] lg:items-end">
-          <MonthYearFilter
-            month={reference.referenceMonth}
-            year={reference.referenceYear}
-            onChange={onReferenceChange}
-          />
-          {isAdmin && (
-            <SelectField label="Colaborador" value={collaboratorId} onChange={onCollaboratorChange}>
-              {collaboratorUsers(store).map((user) => (
-                <option key={user.id} value={user.id}>{user.nome}</option>
-              ))}
-            </SelectField>
-          )}
-          <StatusBadge value={existingMonthly[0]?.status ?? "rascunho"} />
+        <div className="flex flex-col gap-4 xl:flex-row xl:items-end xl:justify-between">
+          <div className="grid flex-1 gap-3 lg:grid-cols-[1fr_1fr_auto] lg:items-end">
+            <MonthYearFilter
+              month={reference.referenceMonth}
+              year={reference.referenceYear}
+              onChange={onReferenceChange}
+            />
+            {isAdmin && (
+              <SelectField label="Colaborador" value={collaboratorId} onChange={onCollaboratorChange}>
+                {collaboratorUsers(store).map((user) => (
+                  <option key={user.id} value={user.id}>{user.nome}</option>
+                ))}
+              </SelectField>
+            )}
+            <div className="flex items-end">
+              <StatusBadge value={existingMonthly[0]?.status ?? "rascunho"} />
+            </div>
+          </div>
+          <div className="flex flex-wrap gap-2 xl:justify-end">
+            <button
+              className="flex h-10 items-center gap-2 rounded-md border border-zinc-200 bg-white px-3 text-sm font-semibold text-zinc-700 transition hover:bg-zinc-100 disabled:cursor-not-allowed disabled:text-zinc-300"
+              disabled={isLocked}
+              type="button"
+              onClick={() => save("rascunho")}
+            >
+              <Save size={16} />
+              Salvar rascunho
+            </button>
+            <button
+              className="flex h-10 items-center gap-2 rounded-md bg-blue-700 px-3 text-sm font-semibold text-white transition hover:bg-blue-800 disabled:cursor-not-allowed disabled:bg-zinc-300"
+              disabled={isLocked}
+              type="button"
+              onClick={() => save("enviado")}
+            >
+              <Send size={16} />
+              Enviar lançamento mensal
+            </button>
+          </div>
+        </div>
+      </section>
+
+      <section className="rounded-lg border border-zinc-200 bg-white p-4">
+        <div className="mb-4 flex flex-col gap-1">
+          <h2 className="text-sm font-semibold text-zinc-950">Lançamento em bloco</h2>
+          <p className="text-sm text-zinc-500">
+            Informe o total trabalhado no projeto para este mês.
+          </p>
+        </div>
+        <div className="grid gap-3 xl:grid-cols-[1.3fr_140px_170px_1fr_auto] xl:items-end">
+          <SelectField
+            label="Projeto"
+            value={selectedBulkProjectId}
+            onChange={setBulkProjectId}
+          >
+            {projects.map((project) => (
+              <option key={project.id} value={project.id}>
+                {project.nome}
+                {isProjectAllocatedToUser(store, project.id, collaboratorId)
+                  ? " (alocado)"
+                  : ""}
+              </option>
+            ))}
+          </SelectField>
+          <label className="block">
+            <span className={labelClass}>Horas</span>
+            <input
+              className={classNames(inputClass, "mt-1 text-right")}
+              disabled={isLocked || !projects.length}
+              inputMode="numeric"
+              pattern="[0-9]{1,4}:[0-5][0-9]"
+              placeholder="HH:MM"
+              type="text"
+              value={bulkHours}
+              onChange={(event) => setBulkHours(event.target.value)}
+            />
+          </label>
+          <SelectField
+            label="Ação"
+            value={bulkMode}
+            onChange={(value) => setBulkMode(value as "replace" | "add")}
+          >
+            <option value="replace">Substituir</option>
+            <option value="add">Somar</option>
+          </SelectField>
+          <label className="block">
+            <span className={labelClass}>Observação</span>
+            <input
+              className={classNames(inputClass, "mt-1")}
+              disabled={isLocked || !projects.length}
+              value={bulkObservation}
+              onChange={(event) => setBulkObservation(event.target.value)}
+            />
+          </label>
+          <button
+            className="flex h-10 items-center justify-center gap-2 rounded-md bg-blue-700 px-3 text-sm font-semibold text-white transition hover:bg-blue-800 disabled:cursor-not-allowed disabled:bg-zinc-300"
+            disabled={isLocked || !selectedBulkProjectId || normalizedBulkHours === "00:00"}
+            type="button"
+            onClick={applyBulkProjectHours}
+          >
+            <Plus size={16} />
+            Aplicar
+          </button>
         </div>
       </section>
 
       <EditableProjectTable
+        colaboradorId={collaboratorId}
         disabled={isLocked}
         projects={projects}
         rows={projectRows}
@@ -1045,38 +1609,20 @@ function MonthlyLaunchForm({
           <InfoPair label="Total demais atividades" value={formatHours(activityTotal)} />
           <InfoPair label="Total geral" value={formatHours(projectTotal + activityTotal)} />
         </div>
-        <div className="mt-4 flex flex-wrap gap-2">
-          <button
-            className="flex h-10 items-center gap-2 rounded-md border border-zinc-200 bg-white px-3 text-sm font-semibold text-zinc-700 transition hover:bg-zinc-100 disabled:cursor-not-allowed disabled:text-zinc-300"
-            disabled={isLocked}
-            type="button"
-            onClick={() => save("rascunho")}
-          >
-            <Save size={16} />
-            Salvar rascunho
-          </button>
-          <button
-            className="flex h-10 items-center gap-2 rounded-md bg-blue-700 px-3 text-sm font-semibold text-white transition hover:bg-blue-800 disabled:cursor-not-allowed disabled:bg-zinc-300"
-            disabled={isLocked}
-            type="button"
-            onClick={() => save("enviado")}
-          >
-            <Send size={16} />
-            Enviar lançamento mensal
-          </button>
-        </div>
       </section>
     </div>
   );
 }
 
 function EditableProjectTable({
+  colaboradorId,
   disabled,
   projects,
   rows,
   store,
   onRowsChange,
 }: {
+  colaboradorId: string;
   disabled: boolean;
   projects: Project[];
   rows: Array<{ projectId: string; hours: string; observation: string }>;
@@ -1100,17 +1646,34 @@ function EditableProjectTable({
             {projects.map((project) => {
               const index = rows.findIndex((row) => row.projectId === project.id);
               const row = rows[index] ?? { projectId: project.id, hours: "", observation: "" };
+              const allocated = isProjectAllocatedToUser(store, project.id, colaboradorId);
               return (
-                <tr className="border-b border-zinc-100 last:border-0" key={project.id}>
-                  <td className="py-3 pr-4 font-medium text-zinc-950">{project.nome}</td>
+                <tr
+                  className={classNames(
+                    "border-b border-zinc-100 last:border-0",
+                    allocated && "bg-blue-50/45",
+                  )}
+                  key={project.id}
+                >
+                  <td className="py-3 pr-4 font-medium text-zinc-950">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span>{project.nome}</span>
+                      {allocated && (
+                        <span className="rounded-md border border-blue-200 bg-blue-50 px-2 py-0.5 text-[11px] font-semibold uppercase text-blue-800">
+                          Alocado
+                        </span>
+                      )}
+                    </div>
+                  </td>
                   <td className="px-3 py-3 text-zinc-600">{findProjectType(store, project.typeId)?.nome ?? "—"}</td>
                   <td className="px-3 py-3">
                     <input
                       className={classNames(inputClass, "ml-auto max-w-28 text-right")}
                       disabled={disabled}
-                      min={0}
-                      step="0.5"
-                      type="number"
+                      inputMode="numeric"
+                      pattern="[0-9]{1,4}:[0-5][0-9]"
+                      placeholder="HH:MM"
+                      type="text"
                       value={row.hours}
                       onChange={(event) => {
                         const next = [...rows];
@@ -1170,9 +1733,10 @@ function EditableOtherActivitiesTable({
                   <input
                     className={classNames(inputClass, "ml-auto max-w-28 text-right")}
                     disabled={disabled}
-                    min={0}
-                    step="0.5"
-                    type="number"
+                    inputMode="numeric"
+                    pattern="[0-9]{1,4}:[0-5][0-9]"
+                    placeholder="HH:MM"
+                    type="text"
                     value={row.hours}
                     onChange={(event) => {
                       const next = [...rows];
@@ -1209,14 +1773,17 @@ function ProjectsView({
   store: StoreData;
   onMutate: (path: string, body: unknown, options?: MutationOptions) => Promise<StoreData>;
 }) {
-  const [form, setForm] = useState<Partial<Project>>({
+  type ProjectForm = Partial<Project> & { allocatedUserIds: string[] };
+  const [form, setForm] = useState<ProjectForm>({
     nome: "",
     identificador: "",
     typeId: store.projectTypes[0]?.id ?? "",
     status: "ativo",
     descricao: "",
+    allocatedUserIds: [],
   });
   const [modalOpen, setModalOpen] = useState(false);
+  const collaboratorOptions = collaboratorUsers(store);
 
   function reset() {
     setForm({
@@ -1225,7 +1792,23 @@ function ProjectsView({
       typeId: store.projectTypes[0]?.id ?? "",
       status: "ativo",
       descricao: "",
+      allocatedUserIds: [],
     });
+  }
+
+  function editProject(project: Project) {
+    setForm({
+      ...project,
+      allocatedUserIds: projectAllocationUserIds(store, project.id),
+    });
+  }
+
+  function toggleAllocatedUser(userId: string) {
+    const allocatedUserIds = form.allocatedUserIds.includes(userId)
+      ? form.allocatedUserIds.filter((id) => id !== userId)
+      : [...form.allocatedUserIds, userId];
+
+    setForm({ ...form, allocatedUserIds });
   }
 
   async function submit(event: FormEvent) {
@@ -1259,10 +1842,39 @@ function ProjectsView({
             <span className={labelClass}>Descrição</span>
             <textarea className={classNames(textareaClass, "mt-1")} value={form.descricao ?? ""} onChange={(event) => setForm({ ...form, descricao: event.target.value })} />
           </label>
+          <fieldset className="rounded-lg border border-zinc-200 p-3">
+            <legend className="px-1 text-xs font-semibold uppercase text-zinc-500">
+              Colaboradores alocados
+            </legend>
+            <div className="mt-2 max-h-56 space-y-2 overflow-y-auto">
+              {collaboratorOptions.map((user) => (
+                <label
+                  className="flex items-center gap-2 rounded-md px-2 py-1 text-sm text-zinc-700 transition hover:bg-zinc-50"
+                  key={user.id}
+                >
+                  <input
+                    checked={form.allocatedUserIds.includes(user.id)}
+                    className="h-4 w-4 rounded border-zinc-300 text-blue-700"
+                    type="checkbox"
+                    onChange={() => toggleAllocatedUser(user.id)}
+                  />
+                  <span>
+                    <span className="block font-medium text-zinc-900">{user.nome}</span>
+                    <span className="text-xs text-zinc-500">{user.cargo || user.email}</span>
+                  </span>
+                </label>
+              ))}
+              {!collaboratorOptions.length && (
+                <p className="rounded-md border border-dashed border-zinc-200 p-3 text-sm text-zinc-500">
+                  Nenhum colaborador ativo cadastrado.
+                </p>
+              )}
+            </div>
+          </fieldset>
           <FormButtons editing={Boolean(form.id)} onCancel={reset} />
         </form>
       </section>
-      <ProjectsTable store={store} onEdit={setForm} onMutate={onMutate} />
+      <ProjectsTable store={store} onEdit={editProject} onMutate={onMutate} />
       <CreateProjectTypeModal
         open={modalOpen}
         onClose={() => setModalOpen(false)}
@@ -1297,6 +1909,7 @@ function ProjectsTable({
               <th className="py-3 pr-4">Projeto</th>
               <th className="px-3 py-3">Identificador</th>
               <th className="px-3 py-3">Tipo</th>
+              <th className="px-3 py-3">Alocados</th>
               <th className="px-3 py-3">Status</th>
               <th className="px-3 py-3 text-right">Ações</th>
             </tr>
@@ -1307,6 +1920,14 @@ function ProjectsTable({
                 <td className="py-3 pr-4 font-medium text-zinc-950">{project.nome}</td>
                 <td className="px-3 py-3 text-zinc-600">{project.identificador}</td>
                 <td className="px-3 py-3 text-zinc-600">{findProjectType(store, project.typeId)?.nome ?? "—"}</td>
+                <td className="max-w-52 px-3 py-3 text-zinc-600">
+                  <span className="line-clamp-2">
+                    {projectAllocationUserIds(store, project.id)
+                      .map((userId) => findUser(store, userId)?.nome)
+                      .filter(Boolean)
+                      .join(", ") || "—"}
+                  </span>
+                </td>
                 <td className="px-3 py-3"><StatusBadge value={project.status} /></td>
                 <td className="px-3 py-3">
                   <div className="flex justify-end gap-2">
@@ -1785,6 +2406,12 @@ function InfoPair({ label, value }: { label: string; value: string }) {
 
 function StatusBadge({ value }: { value: string }) {
   const normalized = value.toLowerCase();
+  const label =
+    normalized === "reaberto"
+      ? "ajuste"
+      : normalized === "misto"
+        ? "misto"
+        : value;
   const colors =
     normalized === "ativo" ||
     normalized === "aprovado" ||
@@ -1793,7 +2420,9 @@ function StatusBadge({ value }: { value: string }) {
       ? "border-emerald-200 bg-emerald-50 text-emerald-800"
       : normalized === "enviado" || normalized === "aberto"
         ? "border-blue-200 bg-blue-50 text-blue-800"
-        : normalized === "rascunho" || normalized === "pausado"
+        : normalized === "rejeitado"
+          ? "border-red-200 bg-red-50 text-red-800"
+          : normalized === "rascunho" || normalized === "pausado" || normalized === "reaberto"
           ? "border-amber-200 bg-amber-50 text-amber-800"
           : normalized === "colaborador"
             ? "border-cyan-200 bg-cyan-50 text-cyan-800"
@@ -1801,7 +2430,7 @@ function StatusBadge({ value }: { value: string }) {
 
   return (
     <span className={classNames("inline-flex items-center rounded-md border px-2 py-1 text-xs font-semibold uppercase", colors)}>
-      {value}
+      {label}
     </span>
   );
 }

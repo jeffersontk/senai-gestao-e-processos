@@ -29,19 +29,20 @@ export type MonthlyEntryStatus =
   | "rascunho"
   | "enviado"
   | "aprovado"
+  | "rejeitado"
   | "reaberto";
 export type TimeRecordStatus = "aberto" | "finalizado" | "ajustado";
 export type OtherActivityCategory = (typeof OTHER_ACTIVITY_CATEGORIES)[number];
 
 export type DailyProjectAllocation = {
   projectId: string;
-  hours: number;
+  hours: string;
   observation: string;
 };
 
 export type DailyOtherActivityAllocation = {
   category: OtherActivityCategory;
-  hours: number;
+  hours: string;
   observation: string;
 };
 
@@ -76,13 +77,21 @@ export type Project = {
   updatedAt: string;
 };
 
+export type ProjectAllocation = {
+  id: string;
+  projectId: string;
+  colaboradorId: string;
+  createdAt: string;
+  updatedAt: string;
+};
+
 export type MonthlyEntry = {
   id: string;
   colaboradorId: string;
   referenceMonth: number;
   referenceYear: number;
   projectId: string;
-  hours: number;
+  hours: string;
   observation: string;
   status: MonthlyEntryStatus;
   createdAt: string;
@@ -95,7 +104,7 @@ export type OtherActivityEntry = {
   referenceMonth: number;
   referenceYear: number;
   category: OtherActivityCategory;
-  hours: number;
+  hours: string;
   observation: string;
   createdAt: string;
   updatedAt: string;
@@ -110,7 +119,7 @@ export type TimeRecord = {
   breakStartAt?: string;
   breakEndAt?: string;
   exitAt?: string;
-  totalHours: number;
+  totalHours: string;
   observation: string;
   status: TimeRecordStatus;
   createdAt: string;
@@ -123,9 +132,9 @@ export type DailyWorkLog = {
   date: string;
   projectAllocations: DailyProjectAllocation[];
   otherActivityAllocations: DailyOtherActivityAllocation[];
-  totalProjectHours: number;
-  totalOtherActivityHours: number;
-  totalHours: number;
+  totalProjectHours: string;
+  totalOtherActivityHours: string;
+  totalHours: string;
   observation: string;
   createdAt: string;
   updatedAt: string;
@@ -175,6 +184,7 @@ export type StoreData = {
   users: User[];
   projectTypes: ProjectType[];
   projects: Project[];
+  projectAllocations: ProjectAllocation[];
   monthlyEntries: MonthlyEntry[];
   otherActivityEntries: OtherActivityEntry[];
   timeRecords: TimeRecord[];

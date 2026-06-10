@@ -1,3 +1,5 @@
+import { minutesToDuration } from "@/lib/duration";
+
 export function getBrazilDate(date = new Date()) {
   const parts = new Intl.DateTimeFormat("en-CA", {
     timeZone: "America/Sao_Paulo",
@@ -30,13 +32,24 @@ export function formatTime(value?: string) {
   }).format(new Date(value));
 }
 
+export function brazilDateTimeToIso(date: string, time: string) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || !/^\d{2}:\d{2}$/.test(time)) {
+    return null;
+  }
+
+  const [hours, minutes] = time.split(":").map(Number);
+  if (hours > 23 || minutes > 59) return null;
+
+  return new Date(`${date}T${time}:00-03:00`).toISOString();
+}
+
 export function calculateWorkedHours(
   entryAt?: string,
   exitAt?: string,
   breakStartAt?: string,
   breakEndAt?: string,
 ) {
-  if (!entryAt || !exitAt) return 0;
+  if (!entryAt || !exitAt) return "00:00";
 
   const totalMs = new Date(exitAt).getTime() - new Date(entryAt).getTime();
   const breakMs =
@@ -44,5 +57,5 @@ export function calculateWorkedHours(
       ? new Date(breakEndAt).getTime() - new Date(breakStartAt).getTime()
       : 0;
 
-  return Math.max(0, Math.round(((totalMs - breakMs) / 3_600_000) * 100) / 100);
+  return minutesToDuration(Math.max(0, Math.round((totalMs - breakMs) / 60_000)));
 }

@@ -6,7 +6,7 @@ export const dynamic = "force-dynamic";
 
 type MonthlyEntryInput = {
   projectId: string;
-  hours: number;
+  hours: string;
   observation?: string;
 };
 

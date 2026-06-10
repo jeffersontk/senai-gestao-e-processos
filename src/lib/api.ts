@@ -1,3 +1,5 @@
+import { normalizeDurationInput } from "@/lib/duration";
+
 export function badRequest(message: string, status = 400) {
   return Response.json({ message }, { status });
 }
@@ -7,7 +9,5 @@ export function created<T>(payload: T) {
 }
 
 export function sanitizeHours(value: unknown) {
-  const parsed = Number(value);
-  if (!Number.isFinite(parsed) || parsed < 0) return 0;
-  return Math.round(parsed * 100) / 100;
+  return normalizeDurationInput(value);
 }

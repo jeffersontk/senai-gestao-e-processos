@@ -1,5 +1,6 @@
 import { badRequest, sanitizeHours } from "@/lib/api";
 import { calculateWorkedHours } from "@/lib/date";
+import { durationToMinutes, minutesToDuration } from "@/lib/duration";
 import { readStore, updateStore } from "@/lib/store";
 import {
   DailyOtherActivityAllocation,
@@ -13,13 +14,13 @@ export const dynamic = "force-dynamic";
 
 type DailyProjectInput = {
   projectId?: string;
-  hours?: number | string;
+  hours?: string;
   observation?: string;
 };
 
 type DailyOtherActivityInput = {
   category?: string;
-  hours?: number | string;
+  hours?: string;
   observation?: string;
 };
 
@@ -64,9 +65,11 @@ export async function POST(request: Request) {
     );
     const totalProjectHours = sumAllocationHours(projectAllocations);
     const totalOtherActivityHours = sumAllocationHours(otherActivityAllocations);
-    const totalHours = totalProjectHours + totalOtherActivityHours;
+    const totalHours = minutesToDuration(
+      durationToMinutes(totalProjectHours) + durationToMinutes(totalOtherActivityHours),
+    );
 
-    if (totalHours <= 0) {
+    if (durationToMinutes(totalHours) <= 0) {
       error = "Informe ao menos uma hora para encerrar o lançamento.";
       return;
     }
@@ -130,7 +133,7 @@ function normalizeProjectAllocations(
       hours: sanitizeHours(entry.hours),
       observation: entry.observation?.trim() ?? "",
     }))
-    .filter((entry) => projectIds.has(entry.projectId) && entry.hours > 0);
+    .filter((entry) => projectIds.has(entry.projectId) && durationToMinutes(entry.hours) > 0);
 }
 
 function normalizeOtherActivityAllocations(
@@ -148,12 +151,14 @@ function normalizeOtherActivityAllocations(
         OTHER_ACTIVITY_CATEGORIES.includes(
           entry.category as DailyOtherActivityAllocation["category"],
         ) &&
-        entry.hours > 0,
+        durationToMinutes(entry.hours) > 0,
     );
 }
 
-function sumAllocationHours(entries: Array<{ hours: number }>) {
-  return entries.reduce((total, entry) => total + entry.hours, 0);
+function sumAllocationHours(entries: Array<{ hours: string }>) {
+  return minutesToDuration(
+    entries.reduce((total, entry) => total + durationToMinutes(entry.hours), 0),
+  );
 }
 
 function applyDailyLogDelta(
@@ -171,7 +176,7 @@ function applyDailyLogDelta(
       referenceMonth,
       referenceYear,
       entry.projectId,
-      -entry.hours,
+      -durationToMinutes(entry.hours),
       now,
     );
   }
@@ -183,7 +188,7 @@ function applyDailyLogDelta(
       referenceMonth,
       referenceYear,
       entry.projectId,
-      entry.hours,
+      durationToMinutes(entry.hours),
       now,
     );
   }
@@ -195,7 +200,7 @@ function applyDailyLogDelta(
       referenceMonth,
       referenceYear,
       entry.category,
-      -entry.hours,
+      -durationToMinutes(entry.hours),
       now,
     );
   }
@@ -207,7 +212,7 @@ function applyDailyLogDelta(
       referenceMonth,
       referenceYear,
       entry.category,
-      entry.hours,
+      durationToMinutes(entry.hours),
       now,
     );
   }
@@ -219,7 +224,7 @@ function updateMonthlyProjectHours(
   referenceMonth: number,
   referenceYear: number,
   projectId: string,
-  delta: number,
+  deltaMinutes: number,
   now: string,
 ) {
   const index = store.monthlyEntries.findIndex(
@@ -231,7 +236,7 @@ function updateMonthlyProjectHours(
   );
 
   if (index < 0) {
-    if (delta <= 0) return;
+    if (deltaMinutes <= 0) return;
 
     store.monthlyEntries.push({
       id: crypto.randomUUID(),
@@ -239,7 +244,7 @@ function updateMonthlyProjectHours(
       referenceMonth,
       referenceYear,
       projectId,
-      hours: delta,
+      hours: minutesToDuration(deltaMinutes),
       observation: "Lançamento diário via calendário",
       status: "rascunho",
       createdAt: now,
@@ -249,9 +254,14 @@ function updateMonthlyProjectHours(
   }
 
   const current = store.monthlyEntries[index];
+  const nextMinutes = Math.max(
+    0,
+    durationToMinutes(current.hours) + deltaMinutes,
+  );
+
   store.monthlyEntries[index] = {
     ...current,
-    hours: Math.max(0, Math.round((current.hours + delta) * 100) / 100),
+    hours: minutesToDuration(nextMinutes),
     observation: current.observation || "Lançamento diário via calendário",
     status: current.status === "aprovado" ? "reaberto" : current.status,
     updatedAt: now,
@@ -264,7 +274,7 @@ function updateMonthlyOtherActivityHours(
   referenceMonth: number,
   referenceYear: number,
   category: DailyOtherActivityAllocation["category"],
-  delta: number,
+  deltaMinutes: number,
   now: string,
 ) {
   const index = store.otherActivityEntries.findIndex(
@@ -276,7 +286,7 @@ function updateMonthlyOtherActivityHours(
   );
 
   if (index < 0) {
-    if (delta <= 0) return;
+    if (deltaMinutes <= 0) return;
 
     store.otherActivityEntries.push({
       id: crypto.randomUUID(),
@@ -284,7 +294,7 @@ function updateMonthlyOtherActivityHours(
       referenceMonth,
       referenceYear,
       category,
-      hours: delta,
+      hours: minutesToDuration(deltaMinutes),
       observation: "Lançamento diário via calendário",
       createdAt: now,
       updatedAt: now,
@@ -293,9 +303,14 @@ function updateMonthlyOtherActivityHours(
   }
 
   const current = store.otherActivityEntries[index];
+  const nextMinutes = Math.max(
+    0,
+    durationToMinutes(current.hours) + deltaMinutes,
+  );
+
   store.otherActivityEntries[index] = {
     ...current,
-    hours: Math.max(0, Math.round((current.hours + delta) * 100) / 100),
+    hours: minutesToDuration(nextMinutes),
     observation: current.observation || "Lançamento diário via calendário",
     updatedAt: now,
   };

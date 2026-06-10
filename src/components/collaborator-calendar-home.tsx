@@ -6,12 +6,23 @@ import {
   ChevronRight,
   Plus,
   Play,
+  Save,
   Square,
   Trash2,
   X,
 } from "lucide-react";
 import { useState, type FormEvent } from "react";
+import { isProjectAllocatedToUser, sortProjectsByAllocation } from "@/lib/allocations";
 import { formatTime, getBrazilDate } from "@/lib/date";
+import {
+  durationInputValue,
+  durationToMinutes,
+  formatDuration,
+  formatDurationFromMinutes,
+  minutesToDuration,
+  normalizeDurationInput,
+  sumDurationMinutes,
+} from "@/lib/duration";
 import {
   OTHER_ACTIVITY_CATEGORIES,
   OtherActivityCategory,
@@ -58,12 +69,6 @@ const labelClass = "text-xs font-semibold uppercase tracking-wide text-zinc-500"
 
 function classNames(...values: Array<string | false | null | undefined>) {
   return values.filter(Boolean).join(" ");
-}
-
-function formatHours(value: number) {
-  return `${value.toLocaleString("pt-BR", {
-    maximumFractionDigits: 2,
-  })}h`;
 }
 
 function toLocalDate(dateString: string) {
@@ -138,7 +143,15 @@ function getDateHour(value?: string) {
   return date.getHours() + date.getMinutes() / 60;
 }
 
-function workedHoursUntilNow(record?: TimeRecord) {
+function toTimeInput(value?: string) {
+  if (!value) return "";
+  const date = new Date(value);
+  const hours = String(date.getHours()).padStart(2, "0");
+  const minutes = String(date.getMinutes()).padStart(2, "0");
+  return `${hours}:${minutes}`;
+}
+
+function workedMinutesUntilNow(record?: TimeRecord) {
   if (!record?.entryAt) return 0;
 
   const totalMs = Date.now() - new Date(record.entryAt).getTime();
@@ -148,11 +161,11 @@ function workedHoursUntilNow(record?: TimeRecord) {
         new Date(record.breakStartAt).getTime()
       : 0;
 
-  return Math.max(0, Math.round(((totalMs - breakMs) / 3_600_000) * 100) / 100);
+  return Math.max(0, Math.round((totalMs - breakMs) / 60_000));
 }
 
 function sumRows(rows: Array<{ hours: string }>) {
-  return rows.reduce((total, row) => total + (Number(row.hours) || 0), 0);
+  return sumDurationMinutes(rows, (row) => row.hours);
 }
 
 function getDailyLog(store: StoreData, colaboradorId: string, date: string) {
@@ -170,10 +183,15 @@ export default function CollaboratorCalendarHome({
   store,
   onMutate,
 }: CollaboratorCalendarHomeProps) {
-  const projects = store.projects.filter((project) => project.status === "ativo");
+  const projects = sortProjectsByAllocation(
+    store.projects.filter((project) => project.status === "ativo"),
+    store,
+    session.id,
+  );
   const today = getBrazilDate();
   const [selectedDate, setSelectedDate] = useState(today);
   const [modalState, setModalState] = useState<WorkDayModalState>(null);
+  const [entryTimeDraft, setEntryTimeDraft] = useState<string | null>(null);
   const visibleWeek = weekDates(selectedDate);
   const currentRecord = store.timeRecords.find(
     (record) => record.colaboradorId === session.id && record.date === today,
@@ -181,8 +199,10 @@ export default function CollaboratorCalendarHome({
   const isOpen = currentRecord?.status === "aberto";
   const isFinalized = currentRecord?.status === "finalizado";
   const workedToday = isOpen
-    ? workedHoursUntilNow(currentRecord)
-    : currentRecord?.totalHours ?? 0;
+    ? minutesToDuration(workedMinutesUntilNow(currentRecord))
+    : currentRecord?.totalHours ?? "00:00";
+  const currentEntryTime = toTimeInput(currentRecord?.entryAt);
+  const entryTime = entryTimeDraft ?? currentEntryTime;
 
   async function startWorkDay() {
     await onMutate(
@@ -194,6 +214,19 @@ export default function CollaboratorCalendarHome({
       },
       { successMessage: "Dia de trabalho iniciado." },
     );
+  }
+
+  async function updateEntryTime() {
+    await onMutate(
+      "/api/time-records",
+      {
+        action: "update-entry",
+        colaboradorId: session.id,
+        entryTime,
+      },
+      { successMessage: "Horario de entrada atualizado." },
+    );
+    setEntryTimeDraft(null);
   }
 
   return (
@@ -231,9 +264,40 @@ export default function CollaboratorCalendarHome({
             {isOpen ? "Encerrar dia de trabalho" : "Iniciar trabalho"}
           </button>
 
+          {isOpen && (
+            <div className="mt-4 rounded-md border border-blue-200 bg-blue-50 p-3">
+              <p className="text-sm font-semibold text-blue-950">
+                Ha um ponto aberto hoje.
+              </p>
+              <p className="mt-1 text-sm text-blue-800">
+                Ajuste a entrada se necessario antes de encerrar o dia.
+              </p>
+              <div className="mt-3 flex items-end gap-2">
+                <label className="block flex-1">
+                  <span className={labelClass}>Hora de inicio</span>
+                  <input
+                    className={classNames(inputClass, "mt-1")}
+                    type="time"
+                    value={entryTime}
+                    onChange={(event) => setEntryTimeDraft(event.target.value)}
+                  />
+                </label>
+                <button
+                  className="flex h-10 items-center gap-2 rounded-md border border-blue-200 bg-white px-3 text-sm font-semibold text-blue-800 transition hover:bg-blue-100 disabled:cursor-not-allowed disabled:text-zinc-400"
+                  disabled={!entryTime || entryTime === currentEntryTime}
+                  type="button"
+                  onClick={updateEntryTime}
+                >
+                  <Save size={15} />
+                  Salvar
+                </button>
+              </div>
+            </div>
+          )}
+
           <div className="mt-5 grid gap-3 rounded-lg border border-zinc-200 bg-zinc-50 p-4">
             <InfoPair label="Entrada" value={formatTime(currentRecord?.entryAt)} />
-            <InfoPair label="Horas de hoje" value={formatHours(workedToday)} />
+            <InfoPair label="Horas de hoje" value={formatDuration(workedToday)} />
           </div>
         </section>
 
@@ -276,7 +340,7 @@ export default function CollaboratorCalendarHome({
                     {log.date}
                   </span>
                   <span className="mt-1 block text-sm text-zinc-500">
-                    {formatHours(log.totalHours)}
+                    {formatDuration(log.totalHours)}
                   </span>
                 </button>
               ))}
@@ -506,7 +570,7 @@ function WorkWeekCalendar({
                 </div>
                 {dayLog && (
                   <p className="mt-2 text-xs font-semibold text-zinc-600">
-                    {formatHours(dayLog.totalHours)} lançadas
+                    {formatDuration(dayLog.totalHours)} lançadas
                   </p>
                 )}
               </div>
@@ -639,7 +703,7 @@ function CalendarLogBlock({
   topOffset: number;
 }) {
   const top = rowHeight + topOffset;
-  const height = Math.max(56, Math.min(log.totalHours * rowHeight, 220));
+  const height = Math.max(56, Math.min((durationToMinutes(log.totalHours) / 60) * rowHeight, 220));
   const projectNames = log.projectAllocations
     .map((entry) => findProject(store, entry.projectId)?.nome)
     .filter(Boolean)
@@ -651,7 +715,7 @@ function CalendarLogBlock({
       style={{ top, height }}
     >
       <p className="font-semibold">Lançamento diário</p>
-      <p className="mt-1 truncate">{formatHours(log.totalHours)}</p>
+      <p className="mt-1 truncate">{formatDuration(log.totalHours)}</p>
       <p className="mt-1 line-clamp-2">
         {projectNames || "Demais atividades"}
       </p>
@@ -679,18 +743,18 @@ function WorkDayModal({
   onMutate: (path: string, body: unknown, options?: MutationOptions) => Promise<StoreData>;
 }) {
   const existingLog = getDailyLog(store, session.id, date);
-  const suggestedHours = mode === "close" ? workedHoursUntilNow(timeRecord) : 0;
+  const suggestedHours = mode === "close" ? minutesToDuration(workedMinutesUntilNow(timeRecord)) : "00:00";
   const [projectRows, setProjectRows] = useState<ProjectRow[]>(() =>
     existingLog?.projectAllocations.length
       ? existingLog.projectAllocations.map((entry) => ({
           projectId: entry.projectId,
-          hours: String(entry.hours),
+          hours: durationInputValue(entry.hours),
           observation: entry.observation,
         }))
       : [
           {
             projectId: projects[0]?.id ?? "",
-            hours: suggestedHours ? String(suggestedHours) : "",
+            hours: durationInputValue(suggestedHours),
             observation: "",
           },
         ],
@@ -699,7 +763,7 @@ function WorkDayModal({
     existingLog?.otherActivityAllocations.length
       ? existingLog.otherActivityAllocations.map((entry) => ({
           category: entry.category,
-          hours: String(entry.hours),
+          hours: durationInputValue(entry.hours),
           observation: entry.observation,
         }))
       : [
@@ -715,7 +779,7 @@ function WorkDayModal({
   const activityTotal = sumRows(activityRows);
   const allocationTotal = projectTotal + activityTotal;
   const workedHours =
-    mode === "close" ? suggestedHours : existingLog?.totalHours ?? allocationTotal;
+    mode === "close" ? suggestedHours : existingLog?.totalHours ?? minutesToDuration(allocationTotal);
 
   async function submit(event: FormEvent) {
     event.preventDefault();
@@ -728,12 +792,12 @@ function WorkDayModal({
         observation,
         projectAllocations: projectRows.map((row) => ({
           projectId: row.projectId,
-          hours: Number(row.hours) || 0,
+          hours: normalizeDurationInput(row.hours),
           observation: row.observation,
         })),
         otherActivityAllocations: activityRows.map((row) => ({
           category: row.category,
-          hours: Number(row.hours) || 0,
+          hours: normalizeDurationInput(row.hours),
           observation: row.observation,
         })),
       },
@@ -760,7 +824,7 @@ function WorkDayModal({
             </h2>
             <p className="mt-1 text-sm text-zinc-500">
               {mode === "close"
-                ? `Hoje você trabalhou ${formatHours(workedHours)}`
+                ? `Hoje você trabalhou ${formatDuration(workedHours)}`
                 : date}
             </p>
           </div>
@@ -812,14 +876,18 @@ function WorkDayModal({
                     {projects.map((project) => (
                       <option key={project.id} value={project.id}>
                         {project.nome}
+                        {isProjectAllocatedToUser(store, project.id, session.id)
+                          ? " (alocado)"
+                          : ""}
                       </option>
                     ))}
                   </select>
                   <input
                     className={inputClass}
-                    min={0}
-                    step="0.25"
-                    type="number"
+                    max="23:59"
+                    min="00:00"
+                    step="60"
+                    type="time"
                     value={row.hours}
                     onChange={(event) => {
                       const next = [...projectRows];
@@ -900,9 +968,10 @@ function WorkDayModal({
                   </select>
                   <input
                     className={inputClass}
-                    min={0}
-                    step="0.25"
-                    type="number"
+                    max="23:59"
+                    min="00:00"
+                    step="60"
+                    type="time"
                     value={row.hours}
                     onChange={(event) => {
                       const next = [...activityRows];
@@ -947,9 +1016,9 @@ function WorkDayModal({
         </div>
 
         <div className="mt-5 grid gap-3 rounded-lg border border-zinc-200 bg-zinc-50 p-4 sm:grid-cols-3">
-          <InfoPair label="Projetos" value={formatHours(projectTotal)} />
-          <InfoPair label="Demais atividades" value={formatHours(activityTotal)} />
-          <InfoPair label="Total alocado" value={formatHours(allocationTotal)} />
+          <InfoPair label="Projetos" value={formatDurationFromMinutes(projectTotal)} />
+          <InfoPair label="Demais atividades" value={formatDurationFromMinutes(activityTotal)} />
+          <InfoPair label="Total alocado" value={formatDurationFromMinutes(allocationTotal)} />
         </div>
 
         <div className="mt-5 flex justify-end gap-2">

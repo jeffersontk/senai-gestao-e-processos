@@ -1,11 +1,11 @@
 import { badRequest } from "@/lib/api";
-import { calculateWorkedHours, getBrazilDate } from "@/lib/date";
+import { brazilDateTimeToIso, calculateWorkedHours, getBrazilDate } from "@/lib/date";
 import { readStore, updateStore } from "@/lib/store";
 import { TimeRecord } from "@/lib/types";
 
 export const dynamic = "force-dynamic";
 
-type TimeAction = "clock-in" | "break-start" | "break-end" | "clock-out";
+type TimeAction = "clock-in" | "break-start" | "break-end" | "clock-out" | "update-entry";
 
 export async function GET() {
   const store = await readStore();
@@ -17,6 +17,7 @@ export async function POST(request: Request) {
     colaboradorId?: string;
     projectId?: string;
     action?: TimeAction;
+    entryTime?: string;
     observation?: string;
   };
 
@@ -56,7 +57,7 @@ export async function POST(request: Request) {
         date: today,
         projectId: body.projectId,
         entryAt: now,
-        totalHours: 0,
+        totalHours: "00:00",
         observation: body.observation?.trim() ?? "",
         status: "aberto",
         createdAt: now,
@@ -68,6 +69,32 @@ export async function POST(request: Request) {
 
     if (!current || current.status !== "aberto") {
       error = "Não há ponto aberto para atualizar.";
+      return;
+    }
+
+    if (body.action === "update-entry") {
+      const entryAt = brazilDateTimeToIso(today, body.entryTime ?? "");
+      if (!entryAt) {
+        error = "Informe um horario de entrada valido.";
+        return;
+      }
+      if (new Date(entryAt).getTime() > new Date(now).getTime()) {
+        error = "O horario de entrada nao pode ser futuro.";
+        return;
+      }
+      if (
+        current.breakStartAt &&
+        new Date(entryAt).getTime() >= new Date(current.breakStartAt).getTime()
+      ) {
+        error = "A entrada deve ser anterior ao intervalo.";
+        return;
+      }
+
+      draft.timeRecords[currentIndex] = {
+        ...current,
+        entryAt,
+        updatedAt: now,
+      };
       return;
     }
 
